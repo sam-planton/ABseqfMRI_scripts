@@ -1,0 +1,3633 @@
+clearvars; close all; clc
+% warning off
+spm('defaults','fmri');
+spm_jobman('initcfg');
+
+%% Set up main folders & subjects list
+% Folders (& spm path)
+if ispc
+    w.datadir        = 'X:\Data\';
+    w.scriptsdir     = 'X:\Scripts\DataAnalysis\';
+    spm_get_defaults('stats.maxmem', 2^33) % allow to use 8GB RAM
+    spm_get_defaults('stats.resmem', true); % keep temporary files in memory instead of writing on disk
+elseif isunix
+    w.datadir        = '/neurospin/unicog/protocols/IRMf/ABseq16fMRI_PlantonAlRoumi_2020/Data/'; 
+    w.scriptsdir     = '/neurospin/unicog/protocols/IRMf/ABseq16fMRI_PlantonAlRoumi_2020/Scripts/DataAnalysis/';
+    spm_path         = '/home/sp253886/MatlabTools/spm12'; addpath(spm_path)
+    spm_get_defaults('stats.maxmem', 2^34) % allow to use 16GB RAM
+    spm_get_defaults('stats.resmem', true); % keep temporary files in memory instead of writing on disk
+end
+addpath(w.scriptsdir);
+addpath(fullfile(w.scriptsdir, 'ProcessingFunctions'));
+addpath(fullfile(w.scriptsdir, 'Utils'));
+
+w.niftidir           = fullfile(w.datadir, '2_PREPROC', filesep);
+w.funcDir            = 'fMRI';                 % functional directory (parent=subject)
+w.structDir          = 'Anat';                 % structural directory (parent=subject)
+w.SecondLevelExplicitMask = fullfile(spm('Dir'),'tpm', 'mask_ICV.nii'); % wholebrain mask
+
+w.subjects  = {'sub_04' 'sub_05' 'sub_06' 'sub_07' 'sub_08' 'sub_09' 'sub_10' 'sub_11' 'sub_12' 'sub_13' 'sub_14' 'sub_15'...
+               'sub_16' 'sub_17' 'sub_18' 'sub_19' 'sub_20' 'sub_21' 'sub_22' 'sub_23' 'sub_24' 'sub_25' 'sub_26'};
+           
+w.subjects  = {'sub_04' 'sub_05' 'sub_06' 'sub_07' 'sub_08'          'sub_10' 'sub_11' 'sub_12' 'sub_13' 'sub_14' 'sub_15'...
+               'sub_16' 'sub_17' 'sub_18' 'sub_19' 'sub_20' 'sub_21' 'sub_22' 'sub_23' 'sub_24' 'sub_25' 'sub_26'}; % Subject sub_09 excluded due to excessive movements
+           
+%% Options
+w.contrast_only  = false;
+w.with_smoothcon = true;
+w.with_physIO    = true;
+w.with_deriv     = false;
+w.with_deriv2    = false;
+
+%% Launch
+fprintf(' \n \n');
+fprintf('========================================================================\n');
+fprintf(['              ABseq16fMRI 2nd level...\n']);
+fprintf('========================================================================\n');
+
+%+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-%
+%==============================================================%
+% DoSmoothContrasts(w, [8 8 8], 'Model_1_concat', true) % Smoothing con images // true to do smoothing even if scon files already exists (e.g. when con where recomputed...)
+Do2ndLevel_Anova_Habituation_only_within(w, 'Model_1_concat')
+Do2ndLevel_Anova_Standard_only_within(w, 'Model_1_concat')
+Do2ndLevel_Anova_Deviants_only_within(w, 'Model_1_concat')
+% Do2ndLevel_onesampleT(w, 'Model_10_concat')
+% Do2ndLevel_onesampleT_perf(w, 'Model_1_concat')
+%==============================================================%
+%+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-%
+
+% ============= OTHER =========================================%
+% DoGroupAverageContrasts(w) % average all subjects contrasts
+% Do2ndLevel_Anova_Main(w)
+% Do2ndLevel_Anova_Main_within(w)
+% Do2ndLevel_Anova_Habituation_only(w)
+% Do2ndLevel_Anova_CorrectResponses_only(w)
+% Do2ndLevel_Anova_CorrectResponses_only_within(w)
+% Do2ndLevel_Anova_HabituationEffect(w)
+% Do2ndLevel_Anova_Deviants_only_withmanualresp(w)
+%==============================================================%
+
+%% Functions
+
+function DoSmoothContrasts(w, fwhm, model, force)
+
+model_sub_folder = model; % 'Model_0' 'Model_1' 'Model_2'
+
+warning on
+
+fprintf([' \n \n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Smoothing contrasts at [%d %d %d]...\n'], fwhm(1),fwhm(2), fwhm(3));
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+
+fprintf(['Collecting files...\n']);
+ N=0;
+for iS=1:numel(w.subjects)
+    
+    clear matlabbatch;
+    stage = 1;
+    disp([w.subjects{iS} '...']);
+    
+    %==============================================================%
+    %  Select contrasts files
+    %==============================================================%
+
+    w.subName        = w.subjects{iS};
+    w.subPath        = fullfile (w.datadir,  '2_PREPROC', w.subjects{iS});
+    w.stimPath       = fullfile (w.datadir,  'SPM_onsets',  w.subName);
+    w.T1Path         = fullfile (w.subPath, w.structDir);
+    
+    % Model folder
+    if w.with_physIO
+        model_folder = fullfile(model_sub_folder, 'PhysIO');
+    else
+        model_folder = fullfile(model_sub_folder, 'Standard');
+    end
+    w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+    if w.with_deriv
+        w.firstDir = fullfile (w.firstDir, 'with_deriv');
+    elseif w.with_deriv2
+        w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+    end
+    
+    confiles = [];
+    confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con' '.*\.nii$'], Inf);
+    alreadysmoothedconfiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon' '.*\.nii$'], Inf);
+    if (size(confiles,1)==size(alreadysmoothedconfiles,1)) && (force==false)
+        warning(['Skipping smoothing for ' w.subName ', smoothed files already exist!'])
+    else
+        
+%     % Add spmT images !!!!
+%     confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^spmT' '.*\.nii$'], Inf);
+%     alreadysmoothedconfiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^sspmT' '.*\.nii$'], Inf);
+%     if size(confiles,1)==size(alreadysmoothedconfiles,1)
+%         warning(['Skipping smoothing for ' w.subName ', smoothed files already exist!'])
+%     else
+%         confilesALL = [confilesALL; cellstr(confiles)];
+%     end
+
+        %==============================================================%
+        %  Fill batch
+        %==============================================================%
+        matlabbatch{stage}.spm.spatial.smooth.data = cellstr(confiles);
+        matlabbatch{stage}.spm.spatial.smooth.fwhm = fwhm;
+        matlabbatch{stage}.spm.spatial.smooth.dtype = 0;
+        matlabbatch{stage}.spm.spatial.smooth.im = 0;
+        matlabbatch{stage}.spm.spatial.smooth.prefix = 's';
+%         stage=stage+1;
+    end
+    
+    %==============================================================%
+    %  Run smooth contrasts batch
+    %==============================================================%
+    fprintf(['Smoothing %d files...\n', N]);
+    spm_jobman('initcfg');
+    spm_jobman('run',matlabbatch);
+
+end
+
+
+end
+
+function DoGroupAverageContrasts(w)
+
+model_sub_folder = 'Model_1';
+conlist = [2 13 24 47:57 59:70]; % model1 / list of contrasts to average
+% conlist = [2 13 24 36 37]; % model2 / list of contrasts to average
+
+%%  SPM batch with subjects loop
+% 2nd level folder
+if w.with_physIO
+    model_folder = fullfile(model_sub_folder, 'GroupAverage', 'PhysIO');
+    model_folder_sub = fullfile(model_sub_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_sub_folder, 'GroupAverage', 'Standard');
+    model_folder_sub = fullfile(model_sub_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+if isdir (w.secondDir)
+    %         delete ([w.secondDir '/*']);
+else
+    mkdir(w.secondDir);
+end
+cd (w.secondDir)
+
+disp(['Output folder is: ' w.secondDir])
+clear matlabbatch;
+
+% Subject file names
+for icon=1:numel(conlist)
+    subimgs = {};
+    for iS=1:numel(w.subjects)
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL', 'ABseq',   w.subjects{iS}, model_folder_sub);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end
+        subimgs{iS} = fullfile(w.firstDir,['sspmT_' num2str(conlist(icon), '%04.f') '.nii']); %%% using smoothed spmT images !!!
+    end
+    disp('Averaging:')
+    disp(subimgs')
+    
+    % Average imcalc expression
+    express=[]; list=1:numel(w.subjects);
+    for iS=1:numel(w.subjects); express = [express 'i' num2str(list(iS)) '+']; end
+    express=['(' express(1:length(express)-1) ')/' num2str(numel(w.subjects))] ;
+    
+    % Apply average with IMCalc function
+    spm_imcalc(subimgs', fullfile(w.secondDir, ['group_average_sspmT_' num2str(conlist(icon), '%04.f') '.nii']), express);
+end
+
+end
+
+function Do2ndLevel_Anova_Main(w)
+
+model_sub_folder = 'Model_1';
+model_group_folder = fullfile('Main_Anova', ['from' model_sub_folder]);
+% Hab  Stand  Dev
+betas_idx = [2:11 13:22 24:33];  % Only T maps (because loading con files) !!
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+disp(['Output folder is: ' w.secondDir])
+
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+    disp(' '); disp('Collecting data from...')
+    confilesSUB = cell(numel(w.subjects), numel(betas_idx));
+    for iS=1:numel(w.subjects)
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end
+        
+        if w.with_smoothcon
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon' '.*\.nii$'], Inf);
+        else
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con' '.*\.nii$'], Inf);
+        end
+        if isempty(confiles); error(['Missing contrast(s) for ' w.subName]); end
+        tmp = cellstr(confiles(betas_idx,:));
+        if size(tmp,1) ~= 30; error(['Issue with contrasts of subject ' w.subjects{iS}]); end
+        for k = 1:numel(betas_idx)
+            confilesSUB{iS,k} = tmp{k};
+        end
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+       
+    for ibeta=1:numel(betas_idx)
+        matlabbatch{stage}.spm.stats.factorial_design.des.anova.icell(ibeta).scans = cellstr(confilesSUB(:,ibeta));
+    end
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.dept = 0; % 1 = Not independant
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.variance = 1; % 1 = unequal variance
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.ancova = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 1; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+% Load contrast info from 1st subject
+if w.with_physIO
+    model_folder = fullfile(model_sub_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_sub_folder, 'Standard');
+end
+if w.with_deriv
+    model_folder = fullfile (model_folder, 'with_deriv');
+elseif w.with_deriv2
+    model_folder = fullfile (model_folder, 'with_deriv2');
+end 
+load(fullfile(w.datadir, '3_FIRST_LEVEL', 'ABseq', 'sub_04', model_folder,  'Contrast_labels.mat'));
+
+names = labels(betas_idx);
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- Effects of interest F-contrasts
+task_conds   = eye(nconds); % All conditions
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-ALL_CONDITIONS';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = normcon2(task_conds);
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name = names{ii};
+%     tmp = conds(ii,:); tmp(tmp==0) = -1/29;
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:));
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (complexity)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Hab', 'Stand', 'Dev'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (complexity) - OPPOSITE DIR
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+vectors = -[vectors; C];
+vnames  = {'BasicComplexity_neg';
+           'GeoComplexity_neg'
+           'GeoChunkComplexity_neg'
+           'GeoChunkCollapse_neg'
+           'pAlt_neg'
+           'Periodicity_neg'
+           'Period_neg'
+           'GeoChunkQuadra_neg'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Hab', 'Stand', 'Dev'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_Main_within(w)
+
+model_sub_folder = 'Model_1';
+model_group_folder = fullfile('Main_AnovaW', ['from' model_sub_folder]);
+% Hab  Stand  Dev
+betas_idx = [2:11 13:22 24:33];  % Only T maps (because loading con files) !!
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+disp(['Output folder is: ' w.secondDir])
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    for iS=1:numel(w.subjects)
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end
+        
+        if w.with_smoothcon
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon' '.*\.nii$'], Inf);
+        else
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con' '.*\.nii$'], Inf);
+        end
+%         if size(confiles) ~= [71 76]
+%             error(['Issue with ' w.subName ' contrasts ?!'])
+%         end
+        confiles = confiles(betas_idx,:);
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).scans = cellstr(confiles);
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).conds = 1:size(confiles,1);
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.dept = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.variance = 1; % 1 = unequal variance (?) /// ERROR with "equal" ??!
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.ancova = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+% load(fullfile(w.datadir, '4_SECOND_LEVEL', 'ABseq', 'Contrast_labels_Model_1.mat'));
+load(fullfile(w.datadir, '3_FIRST_LEVEL', 'ABseq', 'sub_04', model_folder,  'Contrast_labels.mat'));
+names = labels(betas_idx);
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- Effects of interest F-contrasts
+task_conds   = eye(nconds); % All conditions
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-ALL_CONDITIONS';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = normcon2(task_conds);
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name = names{ii};
+%     tmp = conds(ii,:); tmp(tmp==0) = -1/29;
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:));
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (complexity)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Hab', 'Stand', 'Dev'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (complexity) - OPPOSITE DIR
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+vectors = -[vectors; C];
+vnames  = {'BasicComplexity_neg';
+           'GeoComplexity_neg'
+           'GeoChunkComplexity_neg'
+           'GeoChunkCollapse_neg'
+           'pAlt_neg'
+           'Periodicity_neg'
+           'Period_neg'
+           'GeoChunkQuadra_neg'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Hab', 'Stand', 'Dev'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_Habituation_only(w)
+
+model_sub_folder = 'Model_1';
+model_group_folder = fullfile('Habituation_only_Anova', ['from' model_sub_folder]);
+
+list_to_get = { 'Hab_Repeat'
+                'Hab_Alter'
+                'Hab_Pairs'
+                'Hab_Quad'
+                'Hab_PairsAlt'
+                'Hab_Shrink'
+                'Hab_PairsAltBis'
+                'Hab_ThreeTwo'
+                'Hab_CenterMir'
+                'Hab_Complex'};
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+disp(['Output folder is: ' w.secondDir])
+
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+    disp(' '); disp('Collecting data from...')
+    confilesSUB = cell(numel(w.subjects), numel(list_to_get));
+    for iS=1:numel(w.subjects)
+        % First level directory
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end      
+        % Find contrasts numbers corresponding to list_to_get & get
+        % corresponding con files
+        cond_labels = load(fullfile(w.firstDir, 'Contrast_labels.mat')); cond_labels=cond_labels.labels;
+        confiles_selec = {};
+        for ii=1:numel(list_to_get)
+            connum = find(strcmp(cond_labels, list_to_get(ii)));
+            if numel(connum)~= 1; error('Issue with 1st levels contrasts selection'); end
+            if w.with_smoothcon
+                confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon_' num2str(connum,'%04.f') '.nii'], Inf);
+            else
+                confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con_' num2str(connum,'%04.f') '.nii'], Inf);
+            end
+%             confilesSUB{iS,ii} = cellstr(confile);
+            confilesSUB{iS,ii} = (confile);
+        end
+% 
+%         
+%         if w.with_smoothcon
+%             confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon' '.*\.nii$'], Inf);
+%         else
+%             confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con' '.*\.nii$'], Inf);
+%         end
+%         if isempty(confiles); error(['Missing contrast(s) for ' w.subName]); end
+% %         confiles = confiles(betas_idx,:);
+%         tmp = cellstr(confiles(betas_idx,:));
+%         for k = 1:numel(betas_idx)
+%             confilesSUB{iS,k} = tmp{k};
+%         end
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+       
+    for ibeta=1:numel(list_to_get)
+        matlabbatch{stage}.spm.stats.factorial_design.des.anova.icell(ibeta).scans = cellstr(confilesSUB(:,ibeta));
+    end
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.dept = 1; % 1 = Not independant
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.variance = 1; % 1 = Unequal variance
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.ancova = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+% Load contrast info from 1st subject
+if w.with_physIO
+    model_folder = fullfile(model_sub_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_sub_folder, 'Standard');
+end
+if w.with_deriv
+    model_folder = fullfile (model_folder, 'with_deriv');
+elseif w.with_deriv2
+    model_folder = fullfile (model_folder, 'with_deriv2');
+end 
+load(fullfile(w.datadir, '3_FIRST_LEVEL', 'ABseq', 'sub_04', model_folder,  'Contrast_labels.mat'));
+
+names = list_to_get;
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = names{ii};
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:))';
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+%===== V1
+% ref = range(y)/2+min(y);
+% y = -(y - ref).^2;
+% y = y -mean(y);
+% figure; bar(normcon2(y))
+% version1 = normcon2(y)
+%===== V2
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+% version2 = normcon2(yfin)
+% dot(B, C)./ sum(C.*C) ; % =0
+%=====
+
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Hab'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (partial complexity)
+vector = [4 6 6 6 12 15 16 18 21 28]; 
+vname  = 'GeoChunkComplexity';
+for nn = 1:6
+    for ttype = {'Hab'}
+        vectorpart = vector(1:4+nn); 
+        vectorpart = vectorpart- mean(vectorpart);
+        vectorpart = [vectorpart zeros(1, 6-nn)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vname '_part' num2str(nn)];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vectorpart(1)+...
+                    (v.([char(ttype) '_Alter']))      *vectorpart(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vectorpart(3)+...
+                    (v.([char(ttype) '_Quad']))       *vectorpart(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vectorpart(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vectorpart(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vectorpart(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vectorpart(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vectorpart(9)+...
+                    (v.([char(ttype) '_Complex']))    *vectorpart(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (negative complexityvalues)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+vvv = vectors(3,:);
+ref = range(vvv)/2+min(vvv);
+vvv = -(vvv - ref).^2;
+vectors = [vectors; vvv];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+vectors = -vectors;
+for nn = 1 :size(vectors,1)
+    for ttype = {'Hab'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn} '-negat'];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+    
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- F tests between sequences
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-Test_allseq_HAB';
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = [v.Hab_Repeat v.Hab_Alter v.Hab_Pairs v.Hab_Quad v.Hab_PairsAlt v.Hab_PairsAltBis v.Hab_Shrink v.Hab_ThreeTwo v.Hab_CenterMir v.Hab_Complex];
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-Test_allseqVS_HAB';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = [   v.Hab_Repeat - (v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_Alter - (v.Hab_Repeat+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_Pairs - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_Quad - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_PairsAlt - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_Shrink - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_PairsAltBis - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_ThreeTwo - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_CenterMir+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_CenterMir - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_Complex)/9 ;...
+                                                                    v.Hab_Complex - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir)/9];
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_Habituation_only_within(w, model_sub_folder)
+
+model_group_folder = fullfile('Habituation_only_AnovaW', ['from' model_sub_folder]);
+
+list_to_get = { 'Hab_Repeat'
+                'Hab_Alter'
+                'Hab_Pairs'
+                'Hab_Quad'
+                'Hab_PairsAlt'
+                'Hab_Shrink'
+                'Hab_PairsAltBis'
+                'Hab_ThreeTwo'
+                'Hab_CenterMir'
+                'Hab_Complex'};
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+
+% w.secondDir = [w.secondDir '_test'];
+
+disp(['Output folder is: ' w.secondDir])
+
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    for iS=1:numel(w.subjects)
+        % First level directory
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end      
+        % Find contrasts numbers corresponding to list_to_get & get
+        % corresponding con files
+        cond_labels = load(fullfile(w.firstDir, 'Contrast_labels.mat')); cond_labels=cond_labels.labels;
+        confiles_selec = {};
+        for ii=1:numel(list_to_get)
+            connum = find(strcmp(cond_labels, list_to_get(ii)));
+            if numel(connum)~= 1; error('Issue with 1st levels contrasts selection'); end
+            if w.with_smoothcon
+                confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon_' num2str(connum,'%04.f') '.nii'], Inf);
+            else
+                confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con_' num2str(connum,'%04.f') '.nii'], Inf);
+            end
+            confiles_selec(ii,:) = cellstr(confile);
+        end
+        conds_IDs = 1:size(list_to_get,1);
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).scans = confiles_selec;
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).conds = conds_IDs;
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.dept = 1; % 1 = Not independant
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.variance = 1; % 1 = Unequal variance
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.ancova = 0;
+%     TESTING COVARIATES ===========
+%     behavdat = load(fullfile(w.datadir, 'BehavioralData_Results', 'AllSubj_BehavioralData.mat'));
+%     behavdat.subj_data_all = sortrows(behavdat.subj_data_all,'seqID','ascend');
+%     behavdat.subj_data_all = sortrows(behavdat.subj_data_all,'Subject','ascend');
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).c = [behavdat.subj_data_all.MissRate];
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).cname = 'MissRate';
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).iCFI = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).iCC = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).c = [behavdat.subj_data_all.mean_RT];
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).cname = 'mean_RT';
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).iCFI = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).iCC = 1;
+%     =================================
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+% Load contrast info from 1st subject
+if w.with_physIO
+    model_folder = fullfile(model_sub_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_sub_folder, 'Standard');
+end
+if w.with_deriv
+    model_folder = fullfile (model_folder, 'with_deriv');
+elseif w.with_deriv2
+    model_folder = fullfile (model_folder, 'with_deriv2');
+end 
+load(fullfile(w.datadir, '3_FIRST_LEVEL', 'ABseq', 'sub_04', model_folder,  'Contrast_labels.mat'));
+
+names = list_to_get;
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = names{ii};
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:), false)';
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+%===== V1
+% ref = range(y)/2+min(y);
+% y = -(y - ref).^2;
+% y = y -mean(y);
+% figure; bar(normcon2(y))
+% version1 = normcon2(y)
+%===== V2
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+% version2 = normcon2(yfin)
+% dot(B, C)./ sum(C.*C) ; % =0
+%=====
+
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Hab'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (partial complexity)
+vector = [4 6 6 6 12 15 16 18 21 28]; 
+vname  = 'GeoChunkComplexity';
+for nn = 1:6
+    for ttype = {'Hab'}
+        vectorpart = vector(1:4+nn); 
+        vectorpart = vectorpart- mean(vectorpart);
+        vectorpart = [vectorpart zeros(1, 6-nn)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vname '_part' num2str(nn)];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vectorpart(1)+...
+                    (v.([char(ttype) '_Alter']))      *vectorpart(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vectorpart(3)+...
+                    (v.([char(ttype) '_Quad']))       *vectorpart(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vectorpart(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vectorpart(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vectorpart(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vectorpart(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vectorpart(9)+...
+                    (v.([char(ttype) '_Complex']))    *vectorpart(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (negative complexityvalues)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+vvv = vectors(3,:);
+ref = range(vvv)/2+min(vvv);
+vvv = -(vvv - ref).^2;
+vectors = [vectors; vvv];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+vectors = -vectors;
+for nn = 1 :size(vectors,1)
+    for ttype = {'Hab'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn} '-negat'];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+    
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- F tests between sequences
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-Test_allseq_HAB';
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = [v.Hab_Repeat v.Hab_Alter v.Hab_Pairs v.Hab_Quad v.Hab_PairsAlt v.Hab_PairsAltBis v.Hab_Shrink v.Hab_ThreeTwo v.Hab_CenterMir v.Hab_Complex];
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-Test_allseqVS_HAB';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = [   v.Hab_Repeat - (v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9; ...
+                                                                    v.Hab_Alter - (v.Hab_Repeat+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9;...
+                                                                    v.Hab_Pairs - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9; ...
+                                                                    v.Hab_Quad - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9; ...
+                                                                    v.Hab_PairsAlt - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9; ...
+                                                                    v.Hab_Shrink - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9; ...
+                                                                    v.Hab_PairsAltBis - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir+v.Hab_Complex)/9; ...
+                                                                    v.Hab_ThreeTwo - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_CenterMir+v.Hab_Complex)/9; ...
+                                                                    v.Hab_CenterMir - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_Complex)/9; ...
+                                                                    v.Hab_Complex - (v.Hab_Repeat+v.Hab_Alter+v.Hab_Pairs+v.Hab_Quad+v.Hab_PairsAlt+v.Hab_PairsAltBis+v.Hab_Shrink+v.Hab_ThreeTwo+v.Hab_CenterMir)/9];
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_Standard_only_within(w, model_sub_folder)
+
+model_group_folder = fullfile('Standard_only_AnovaW', ['from' model_sub_folder]);
+
+list_to_get = { 'Stand_Repeat'
+                'Stand_Alter'
+                'Stand_Pairs'
+                'Stand_Quad'
+                'Stand_PairsAlt'
+                'Stand_Shrink'
+                'Stand_PairsAltBis'
+                'Stand_ThreeTwo'
+                'Stand_CenterMir'
+                'Stand_Complex'};
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+
+% w.secondDir = [w.secondDir '_test'];
+
+disp(['Output folder is: ' w.secondDir])
+
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    for iS=1:numel(w.subjects)
+        % First level directory
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end      
+        % Find contrasts numbers corresponding to list_to_get & get
+        % corresponding con files
+        cond_labels = load(fullfile(w.firstDir, 'Contrast_labels.mat')); cond_labels=cond_labels.labels;
+        confiles_selec = {};
+        for ii=1:numel(list_to_get)
+            connum = find(strcmp(cond_labels, list_to_get(ii)));
+            if numel(connum)~= 1; error('Issue with 1st levels contrasts selection'); end
+            if w.with_smoothcon
+                confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon_' num2str(connum,'%04.f') '.nii'], Inf);
+            else
+                confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con_' num2str(connum,'%04.f') '.nii'], Inf);
+            end
+            confiles_selec(ii,:) = cellstr(confile);
+        end
+        conds_IDs = 1:size(list_to_get,1);
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).scans = confiles_selec;
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).conds = conds_IDs;
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.dept = 1; % 1 = Not independant
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.variance = 1; % 1 = Unequal variance
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.ancova = 0;
+%     TESTING COVARIATES ===========
+%     behavdat = load(fullfile(w.datadir, 'BehavioralData_Results', 'AllSubj_BehavioralData.mat'));
+%     behavdat.subj_data_all = sortrows(behavdat.subj_data_all,'seqID','ascend');
+%     behavdat.subj_data_all = sortrows(behavdat.subj_data_all,'Subject','ascend');
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).c = [behavdat.subj_data_all.MissRate];
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).cname = 'MissRate';
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).iCFI = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).iCC = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).c = [behavdat.subj_data_all.mean_RT];
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).cname = 'mean_RT';
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).iCFI = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).iCC = 1;
+%     =================================
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+% Load contrast info from 1st subject
+if w.with_physIO
+    model_folder = fullfile(model_sub_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_sub_folder, 'Standard');
+end
+if w.with_deriv
+    model_folder = fullfile (model_folder, 'with_deriv');
+elseif w.with_deriv2
+    model_folder = fullfile (model_folder, 'with_deriv2');
+end 
+load(fullfile(w.datadir, '3_FIRST_LEVEL', 'ABseq', 'sub_04', model_folder,  'Contrast_labels.mat'));
+
+names = list_to_get;
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = names{ii};
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:), false)';
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+%===== V1
+% ref = range(y)/2+min(y);
+% y = -(y - ref).^2;
+% y = y -mean(y);
+% figure; bar(normcon2(y))
+% version1 = normcon2(y)
+%===== V2
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+% version2 = normcon2(yfin)
+% dot(B, C)./ sum(C.*C) ; % =0
+%=====
+
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Stand'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (partial complexity)
+vector = [4 6 6 6 12 15 16 18 21 28]; 
+vname  = 'GeoChunkComplexity';
+for nn = 1:6
+    for ttype = {'Stand'}
+        vectorpart = vector(1:4+nn); 
+        vectorpart = vectorpart- mean(vectorpart);
+        vectorpart = [vectorpart zeros(1, 6-nn)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vname '_part' num2str(nn)];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vectorpart(1)+...
+                    (v.([char(ttype) '_Alter']))      *vectorpart(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vectorpart(3)+...
+                    (v.([char(ttype) '_Quad']))       *vectorpart(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vectorpart(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vectorpart(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vectorpart(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vectorpart(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vectorpart(9)+...
+                    (v.([char(ttype) '_Complex']))    *vectorpart(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (negative complexityvalues)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+vvv = vectors(3,:);
+ref = range(vvv)/2+min(vvv);
+vvv = -(vvv - ref).^2;
+vectors = [vectors; vvv];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+vectors = -vectors;
+for nn = 1 :size(vectors,1)
+    for ttype = {'Stand'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn} '-negat'];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+    
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- F tests between sequences
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-Test_allseqVS_STAND';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = [   v.Stand_Repeat - (v.Stand_Alter+v.Stand_Pairs+v.Stand_Quad+v.Stand_PairsAlt+v.Stand_PairsAltBis+v.Stand_Shrink+v.Stand_ThreeTwo+v.Stand_CenterMir+v.Stand_Complex)/9; ...
+                                                                    v.Stand_Alter - (v.Stand_Repeat+v.Stand_Pairs+v.Stand_Quad+v.Stand_PairsAlt+v.Stand_PairsAltBis+v.Stand_Shrink+v.Stand_ThreeTwo+v.Stand_CenterMir+v.Stand_Complex)/9;...
+                                                                    v.Stand_Pairs - (v.Stand_Repeat+v.Stand_Alter+v.Stand_Quad+v.Stand_PairsAlt+v.Stand_PairsAltBis+v.Stand_Shrink+v.Stand_ThreeTwo+v.Stand_CenterMir+v.Stand_Complex)/9; ...
+                                                                    v.Stand_Quad - (v.Stand_Repeat+v.Stand_Alter+v.Stand_Pairs+v.Stand_PairsAlt+v.Stand_PairsAltBis+v.Stand_Shrink+v.Stand_ThreeTwo+v.Stand_CenterMir+v.Stand_Complex)/9; ...
+                                                                    v.Stand_PairsAlt - (v.Stand_Repeat+v.Stand_Alter+v.Stand_Pairs+v.Stand_Quad+v.Stand_PairsAltBis+v.Stand_Shrink+v.Stand_ThreeTwo+v.Stand_CenterMir+v.Stand_Complex)/9; ...
+                                                                    v.Stand_Shrink - (v.Stand_Repeat+v.Stand_Alter+v.Stand_Pairs+v.Stand_Quad+v.Stand_PairsAlt+v.Stand_PairsAltBis+v.Stand_ThreeTwo+v.Stand_CenterMir+v.Stand_Complex)/9; ...
+                                                                    v.Stand_PairsAltBis - (v.Stand_Repeat+v.Stand_Alter+v.Stand_Pairs+v.Stand_Quad+v.Stand_PairsAlt+v.Stand_Shrink+v.Stand_ThreeTwo+v.Stand_CenterMir+v.Stand_Complex)/9; ...
+                                                                    v.Stand_ThreeTwo - (v.Stand_Repeat+v.Stand_Alter+v.Stand_Pairs+v.Stand_Quad+v.Stand_PairsAlt+v.Stand_PairsAltBis+v.Stand_Shrink+v.Stand_CenterMir+v.Stand_Complex)/9; ...
+                                                                    v.Stand_CenterMir - (v.Stand_Repeat+v.Stand_Alter+v.Stand_Pairs+v.Stand_Quad+v.Stand_PairsAlt+v.Stand_PairsAltBis+v.Stand_Shrink+v.Stand_ThreeTwo+v.Stand_Complex)/9; ...
+                                                                    v.Stand_Complex - (v.Stand_Repeat+v.Stand_Alter+v.Stand_Pairs+v.Stand_Quad+v.Stand_PairsAlt+v.Stand_PairsAltBis+v.Stand_Shrink+v.Stand_ThreeTwo+v.Stand_CenterMir)/9];
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_Deviants_only_within(w, model_sub_folder)
+
+model_group_folder = fullfile('Deviants_only_AnovaW', ['from' model_sub_folder]);
+
+list_to_get = { 'Dev_Repeat'
+                'Dev_Alter'
+                'Dev_Pairs'
+                'Dev_Quad'
+                'Dev_PairsAlt'
+                'Dev_Shrink'
+                'Dev_PairsAltBis'
+                'Dev_ThreeTwo'
+                'Dev_CenterMir'
+                'Dev_Complex'};
+if strcmp(model_sub_folder, 'Model_10_concat')
+    list_to_get = { 'DetectedDev_Repeat'
+                    'DetectedDev_Alter'
+                    'DetectedDev_Pairs'
+                    'DetectedDev_Quad'
+                    'DetectedDev_PairsAlt'
+                    'DetectedDev_Shrink'
+                    'DetectedDev_PairsAltBis'
+                    'DetectedDev_ThreeTwo'
+                    'DetectedDev_CenterMir'
+                    'DetectedDev_Complex'};
+end
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+
+% w.secondDir = [w.secondDir '_test'];
+
+disp(['Output folder is: ' w.secondDir])
+
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    for iS=1:numel(w.subjects)
+        % First level directory
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end      
+        % Find contrasts numbers corresponding to list_to_get & get
+        % corresponding con files
+        cond_labels = load(fullfile(w.firstDir, 'Contrast_labels.mat')); cond_labels=cond_labels.labels;
+        confiles_selec = {};
+        conds_IDs = [];
+        for ii=1:numel(list_to_get)
+            connum = find(strcmp(cond_labels, list_to_get(ii)));
+%             if numel(connum)~= 1; error('Issue with 1st levels contrasts selection'); end
+            if numel(connum)== 1 % If the contrast is absent, skip and no cond_ID
+                if w.with_smoothcon
+                    confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon_' num2str(connum,'%04.f') '.nii'], Inf);
+                else
+                    confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con_' num2str(connum,'%04.f') '.nii'], Inf);
+                end
+                confiles_selec(ii,:) = cellstr(confile);
+                conds_IDs = [conds_IDs; ii]; 
+            else
+                disp(['... ' list_to_get{ii} ' is missing ...']);
+            end
+        end
+%         conds_IDs = 1:size(list_to_get,1);
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).scans = confiles_selec;
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).conds = conds_IDs;
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.dept = 1; % 1 = Not independant
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.variance = 1; % 1 = Unequal variance
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.ancova = 0;
+%     TESTING COVARIATES ===========
+%     behavdat = load(fullfile(w.datadir, 'BehavioralData_Results', 'AllSubj_BehavioralData.mat'));
+%     behavdat.subj_data_all = sortrows(behavdat.subj_data_all,'seqID','ascend');
+%     behavdat.subj_data_all = sortrows(behavdat.subj_data_all,'Subject','ascend');
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).c = [behavdat.subj_data_all.MissRate];
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).cname = 'MissRate';
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).iCFI = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(1).iCC = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).c = [behavdat.subj_data_all.mean_RT];
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).cname = 'mean_RT';
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).iCFI = 1;
+%     matlabbatch{stage}.spm.stats.factorial_design.cov(2).iCC = 1;
+%     =================================
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+% Load contrast info from 1st subject
+if w.with_physIO
+    model_folder = fullfile(model_sub_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_sub_folder, 'Standard');
+end
+if w.with_deriv
+    model_folder = fullfile (model_folder, 'with_deriv');
+elseif w.with_deriv2
+    model_folder = fullfile (model_folder, 'with_deriv2');
+end 
+load(fullfile(w.datadir, '3_FIRST_LEVEL', 'ABseq', 'sub_04', model_folder,  'Contrast_labels.mat'));
+
+names = list_to_get;
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = names{ii};
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:), false)';
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+%===== V2
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+%=====
+
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Dev'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (partial complexity)
+vector = [4 6 6 6 12 15 16 18 21 28]; 
+vname  = 'GeoChunkComplexity';
+for nn = 1:6
+    for ttype = {'Dev'}
+        vectorpart = vector(1:4+nn); 
+        vectorpart = vectorpart- mean(vectorpart);
+        vectorpart = [vectorpart zeros(1, 6-nn)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vname '_part' num2str(nn)];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vectorpart(1)+...
+                    (v.([char(ttype) '_Alter']))      *vectorpart(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vectorpart(3)+...
+                    (v.([char(ttype) '_Quad']))       *vectorpart(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vectorpart(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vectorpart(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vectorpart(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vectorpart(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vectorpart(9)+...
+                    (v.([char(ttype) '_Complex']))    *vectorpart(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (negative complexityvalues)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+vvv = vectors(3,:);
+ref = range(vvv)/2+min(vvv);
+vvv = -(vvv - ref).^2;
+vectors = [vectors; vvv];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+vectors = -vectors;
+for nn = 1 :size(vectors,1)
+    for ttype = {'Dev'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn} '-negat'];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths, false)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+    
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- F tests between sequences
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-Test_allseqVS_DEV';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = [   v.Dev_Repeat - (v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9; ...
+                                                                    v.Dev_Alter - (v.Dev_Repeat+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9;...
+                                                                    v.Dev_Pairs - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9; ...
+                                                                    v.Dev_Quad - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9; ...
+                                                                    v.Dev_PairsAlt - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9; ...
+                                                                    v.Dev_Shrink - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9; ...
+                                                                    v.Dev_PairsAltBis - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9; ...
+                                                                    v.Dev_ThreeTwo - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_CenterMir+v.Dev_Complex)/9; ...
+                                                                    v.Dev_CenterMir - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_Complex)/9; ...
+                                                                    v.Dev_Complex - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir)/9];
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_Deviants_only_within_OLD(w)
+
+model_sub_folder = 'Model_1';
+model_group_folder = fullfile('Deviants_only_AnovaW', ['from' model_sub_folder]);
+betas_idx = [24:33];  % Only T maps (because loading con files) !!
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+disp(['Output folder is: ' w.secondDir])
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    for iS=1:numel(w.subjects)
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end
+        
+        if w.with_smoothcon
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon' '.*\.nii$'], Inf);
+        else
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con' '.*\.nii$'], Inf);
+        end
+        if isempty(confiles); error(['Missing contrast(s) for ' w.subName]); end
+        confiles = confiles(betas_idx,:);
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).scans = cellstr(confiles);
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).conds = 1:size(confiles,1);
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.dept = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.variance = 1; % 1 = unequal variance (?) /// ERROR with "equal" ??!
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.ancova = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+% Load contrast info from 1st subject
+if w.with_physIO
+    model_folder = fullfile(model_sub_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_sub_folder, 'Standard');
+end
+if w.with_deriv
+    model_folder = fullfile (model_folder, 'with_deriv');
+elseif w.with_deriv2
+    model_folder = fullfile (model_folder, 'with_deriv2');
+end 
+load(fullfile(w.datadir, '3_FIRST_LEVEL', 'ABseq', 'sub_04', model_folder,  'Contrast_labels.mat'));
+names = labels(betas_idx);
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+%-- Sequence
+Repeat_betas   = endsWith(names,'_Repeat') + endsWith(names,'_Repeat_vsR');  % one or the other depending on the 1st level model...
+Alter_betas    = endsWith(names,'_Alter') + endsWith(names,'_Alter_vsR');
+Pairs_betas    = endsWith(names,'_Pairs') + endsWith(names,'_Pairs_vsR');
+Quad_betas     = endsWith(names,'_Quad') + endsWith(names,'_Quad_vsR');
+PairsAlt_betas = endsWith(names,'_PairsAlt') + endsWith(names,'_PairsAlt_vsR');
+PairsAltBis_betas = endsWith(names,'_PairsAltBis') + endsWith(names,'_PairsAltBis_vsR');
+Shrink_betas   = endsWith(names,'_Shrink') + endsWith(names,'_Shrink_vsR');
+ThreeTwo_betas = endsWith(names,'_ThreeTwo') + endsWith(names,'_ThreeTwo_vsR');
+CenterMir_betas  = endsWith(names,'_CenterMir') + endsWith(names,'_CenterMir_vsR');
+Complex_betas  = endsWith(names,'_Complex') + endsWith(names,'_Complex_vsR');
+
+%-- Trial type
+hab_betas      = contains(names,'Hab');
+stand_betas    = contains(names,'Stand');
+dev_betas    = contains(names,'Dev');
+
+%====== Vectors for each condition, with sum=1
+
+% Habituation trials
+v.Hab_Repeat      = normcon(hab_betas.*Repeat_betas);
+v.Hab_Alter       = normcon(hab_betas.*Alter_betas);
+v.Hab_Pairs       = normcon(hab_betas.*Pairs_betas);
+v.Hab_Quad        = normcon(hab_betas.*Quad_betas);
+v.Hab_PairsAlt    = normcon(hab_betas.*PairsAlt_betas);
+v.Hab_PairsAltBis = normcon(hab_betas.*PairsAltBis_betas);
+v.Hab_Shrink      = normcon(hab_betas.*Shrink_betas);
+v.Hab_ThreeTwo    = normcon(hab_betas.*ThreeTwo_betas);
+v.Hab_CenterMir   = normcon(hab_betas.*CenterMir_betas);
+v.Hab_Complex     = normcon(hab_betas.*Complex_betas);
+
+% Standard trials
+v.Stand_Repeat      = normcon(stand_betas.*Repeat_betas);
+v.Stand_Alter       = normcon(stand_betas.*Alter_betas);
+v.Stand_Pairs       = normcon(stand_betas.*Pairs_betas);
+v.Stand_Quad        = normcon(stand_betas.*Quad_betas);
+v.Stand_PairsAlt    = normcon(stand_betas.*PairsAlt_betas);
+v.Stand_PairsAltBis = normcon(stand_betas.*PairsAltBis_betas);
+v.Stand_Shrink      = normcon(stand_betas.*Shrink_betas);
+v.Stand_ThreeTwo    = normcon(stand_betas.*ThreeTwo_betas);
+v.Stand_CenterMir   = normcon(stand_betas.*CenterMir_betas);
+v.Stand_Complex     = normcon(stand_betas.*Complex_betas);
+
+% Deviant trials
+v.Dev_Repeat      = normcon(dev_betas.*Repeat_betas);
+v.Dev_Alter       = normcon(dev_betas.*Alter_betas);
+v.Dev_Pairs       = normcon(dev_betas.*Pairs_betas);
+v.Dev_Quad        = normcon(dev_betas.*Quad_betas);
+v.Dev_PairsAlt    = normcon(dev_betas.*PairsAlt_betas);
+v.Dev_PairsAltBis = normcon(dev_betas.*PairsAltBis_betas);
+v.Dev_Shrink      = normcon(dev_betas.*Shrink_betas);
+v.Dev_ThreeTwo    = normcon(dev_betas.*ThreeTwo_betas);
+v.Dev_CenterMir   = normcon(dev_betas.*CenterMir_betas);
+v.Dev_Complex     = normcon(dev_betas.*Complex_betas);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = names{ii};
+%     tmp = conds(ii,:); tmp(tmp==0) = -1/9;
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:));
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Dev'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (partial complexity)
+vector = [4 6 6 6 12 15 16 18 21 28]; 
+vname  = 'GeoChunkComplexity';
+for nn = 1:6
+    for ttype = {'Dev'}
+        vectorpart = vector(1:4+nn); 
+        vectorpart = vectorpart- mean(vectorpart);
+        vectorpart = [vectorpart zeros(1, 6-nn)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vname '_part' num2str(nn)];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vectorpart(1)+...
+                    (v.([char(ttype) '_Alter']))      *vectorpart(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vectorpart(3)+...
+                    (v.([char(ttype) '_Quad']))       *vectorpart(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vectorpart(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vectorpart(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vectorpart(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vectorpart(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vectorpart(9)+...
+                    (v.([char(ttype) '_Complex']))    *vectorpart(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (negative complexityvalues)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+vvv = vectors(3,:);
+ref = range(vvv)/2+min(vvv);
+vvv = -(vvv - ref).^2;
+vectors = [vectors; vvv];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+vectors = -vectors;
+for nn = 1 :size(vectors,1)
+    for ttype = {'Dev'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn} '-negat'];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- F tests between sequences
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-Test_allseq_DEV';
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = [v.Dev_Repeat v.Dev_Alter v.Dev_Pairs v.Dev_Quad v.Dev_PairsAlt v.Dev_PairsAltBis v.Dev_Shrink v.Dev_ThreeTwo v.Dev_CenterMir v.Dev_Complex];
+% matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.name    = 'F-Test_allseqVS_DEV';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.weights = [   v.Dev_Repeat - (v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9 ...
+                                                                    v.Dev_Alter - (v.Dev_Repeat+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9 ...
+                                                                    v.Dev_Pairs - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9 ...
+                                                                    v.Dev_Quad - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9 ...
+                                                                    v.Dev_PairsAlt - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9 ...
+                                                                    v.Dev_Shrink - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9 ...
+                                                                    v.Dev_PairsAltBis - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir+v.Dev_Complex)/9 ...
+                                                                    v.Dev_ThreeTwo - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_CenterMir+v.Dev_Complex)/9 ...
+                                                                    v.Dev_CenterMir - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_Complex)/9 ...
+                                                                    v.Dev_Complex - (v.Dev_Repeat+v.Dev_Alter+v.Dev_Pairs+v.Dev_Quad+v.Dev_PairsAlt+v.Dev_PairsAltBis+v.Dev_Shrink+v.Dev_ThreeTwo+v.Dev_CenterMir)/9];
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.fcon.sessrep = 'none'; n_cont = n_cont+1;
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_CorrectResponses_only(w)
+
+model_sub_folder = 'Model_6';
+model_group_folder = fullfile('CorrectResponses_only_Anova', ['from' model_sub_folder]);
+
+list_to_get = { 'Correct_Repeat'
+                'Correct_Alter'
+                'Correct_Pairs'
+                'Correct_Quad'
+                'Correct_PairsAlt'
+                'Correct_Shrink'
+                'Correct_PairsAltBis'
+                'Correct_ThreeTwo'
+                'Correct_CenterMir'
+                'Correct_Complex'
+                'CorrectRTmodul_Repeat'
+                'CorrectRTmodul_Alter'
+                'CorrectRTmodul_Pairs'
+                'CorrectRTmodul_Quad'
+                'CorrectRTmodul_PairsAlt'
+                'CorrectRTmodul_Shrink'
+                'CorrectRTmodul_PairsAltBis'
+                'CorrectRTmodul_ThreeTwo'
+                'CorrectRTmodul_CenterMir'
+                'CorrectRTmodul_Complex'};
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+disp(['Output folder is: ' w.secondDir])
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+    confilesSUB = cell(numel(w.subjects), numel(list_to_get));
+    for iS=1:numel(w.subjects)
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end
+        
+        if w.with_smoothcon
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon' '.*\.nii$'], Inf);
+        else
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con' '.*\.nii$'], Inf);
+        end
+        if isempty(confiles); error(['Missing contrast(s) for ' w.subName]); end
+        
+        cond_labels = load(fullfile(w.firstDir, 'Contrast_labels.mat')); cond_labels=cond_labels.labels;
+        confiles_selec = {};
+        for ii=1:numel(list_to_get)
+            idx = find(strcmp(cond_labels, list_to_get(ii)));
+            confilesSUB{iS,ii} = confiles(idx,:);
+        end
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    for ibeta=1:numel(list_to_get)
+        tmp = cellstr(confilesSUB(:,ibeta));
+        missing = find(cellfun(@isempty,tmp));
+        tmp(missing) = [];
+        matlabbatch{stage}.spm.stats.factorial_design.des.anova.icell(ibeta).scans = tmp;
+    end
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.dept = 1; % 1 = Not independant
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.variance = 1; % 1 = Unequal variance
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anova.ancova = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+names = list_to_get;
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+normcon_sumtoone = @(x) x./sum(x);
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = names{ii};
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:));
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Correct', 'CorrectRTmodul'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (negative complexityvalues)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+vvv = vectors(3,:);
+ref = range(vvv)/2+min(vvv);
+vvv = -(vvv - ref).^2;
+vectors = [vectors; vvv];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+vectors = -vectors;
+for nn = 1 :size(vectors,1)
+    for ttype = {'Correct', 'CorrectRTmodul'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_CorrectResponses_only_within(w)
+
+model_sub_folder = 'Model_6';
+model_group_folder = fullfile('CorrectResponses_only_AnovaW', ['from' model_sub_folder]);
+
+list_to_get = { 'Correct_Repeat'
+                'Correct_Alter'
+                'Correct_Pairs'
+                'Correct_Quad'
+                'Correct_PairsAlt'
+                'Correct_Shrink'
+                'Correct_PairsAltBis'
+                'Correct_ThreeTwo'
+                'Correct_CenterMir'
+                'Correct_Complex'
+                'CorrectRTmodul_Repeat'
+                'CorrectRTmodul_Alter'
+                'CorrectRTmodul_Pairs'
+                'CorrectRTmodul_Quad'
+                'CorrectRTmodul_PairsAlt'
+                'CorrectRTmodul_Shrink'
+                'CorrectRTmodul_PairsAltBis'
+                'CorrectRTmodul_ThreeTwo'
+                'CorrectRTmodul_CenterMir'
+                'CorrectRTmodul_Complex'};
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+disp(['Output folder is: ' w.secondDir])
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    for iS=1:numel(w.subjects)
+        % First level directory
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end      
+        % Find contrasts numbers corresponding to list_to_get & get
+        % corresponding con files
+        cond_labels = load(fullfile(w.firstDir, 'Contrast_labels.mat')); cond_labels=cond_labels.labels;
+        confiles_selec = {};
+        for ii=1:numel(list_to_get)
+            connum = find(strcmp(cond_labels, list_to_get(ii)));
+            if w.with_smoothcon
+                confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon_' num2str(connum,'%04.f') '.nii'], Inf);
+            else
+                confile = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con_' num2str(connum,'%04.f') '.nii'], Inf);
+            end
+            confiles_selec(ii,:) = cellstr(confile);
+        end
+        conds_IDs = 1:size(list_to_get,1);
+        % Remove missing contrasts
+        missing_conds = find(cellfun(@isempty,confiles_selec)); 
+        confiles_selec(missing_conds) = [];
+        conds_IDs(missing_conds) = [];
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).scans = confiles_selec;
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).conds = conds_IDs;
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.dept = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.variance = 1; % 1 = unequal variance (?) /// ERROR with "equal" ??!
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.ancova = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+names = list_to_get;
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+normcon_sumtoone = @(x) x./sum(x);
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = names{ii};
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(conds(ii,:));
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+y = vectors(3,:);
+A = y;
+B = y.^2;
+B = B - mean(B);
+C = A - (sum(A.*B)./sum(B.^2).*B);
+vectors = [vectors; C];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+for nn = 1 :size(vectors,1)
+    for ttype = {'Correct', 'CorrectRTmodul'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (negative complexityvalues)
+vectors = [1 2 3 4 5 6 7 8 9 10;
+           4 6 6 6 12 14 13 15 17 23;
+           4 6 6 6 12 15 16 18 21 28;
+           4 6 6 6 12 15 16 18 21 4;
+           0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+           16 8 4 2 2 1 2 2 1 1;
+           1 2 4 8 8 16 8 8 16 16]; 
+% add quadratic of geochunk
+vvv = vectors(3,:);
+ref = range(vvv)/2+min(vvv);
+vvv = -(vvv - ref).^2;
+vectors = [vectors; vvv];
+vnames  = {'BasicComplexity';
+           'GeoComplexity'
+           'GeoChunkComplexity'
+           'GeoChunkCollapse'
+           'pAlt'
+           'Periodicity'
+           'Period'
+           'GeoChunkQuadra'};
+vectors = -vectors;
+for nn = 1 :size(vectors,1)
+    for ttype = {'Correct', 'CorrectRTmodul'}
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-' char(ttype) '-' vnames{nn}];
+        weigths =  [(v.([char(ttype) '_Repeat']))     *vector(1)+...
+                    (v.([char(ttype) '_Alter']))      *vector(2)+...
+                    (v.([char(ttype) '_Pairs']))      *vector(3)+...
+                    (v.([char(ttype) '_Quad']))       *vector(4)+...
+                    (v.([char(ttype) '_PairsAlt']))   *vector(5)+...
+                    (v.([char(ttype) '_Shrink']))     *vector(6)+...
+                    (v.([char(ttype) '_PairsAltBis']))*vector(7)+...
+                    (v.([char(ttype) '_ThreeTwo']))   *vector(8)+...
+                    (v.([char(ttype) '_CenterMir']))  *vector(9)+...
+                    (v.([char(ttype) '_Complex']))    *vector(10)];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon2(weigths)';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+    end
+end
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_Anova_Deviants_only_withmanualresp(w)
+
+model_group_folder = 'Deviants_only_withmanualresp_AnovaW';
+betas_idx = [24:35];  % Only T maps (because loading con files) !!
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+disp(['Output folder is: ' w.secondDir])
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); 
+        %delete ([w.secondDir '/*']);
+    else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    model_sub_folder = 'Model_0';
+    for iS=1:numel(w.subjects)
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end
+        
+        if w.with_smoothcon
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon' '.*\.nii$'], Inf);
+        else
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con' '.*\.nii$'], Inf);
+        end
+%         if size(confiles) ~= [71 76]
+%             error(['Issue with ' w.subName ' contrasts ?!'])
+%         end
+        confiles = confiles(betas_idx,:);
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).scans = cellstr(confiles);
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).conds = 1:size(confiles,1);
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.dept = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.variance = 1; % 1 = unequal variance (?) /// ERROR with "equal" ??!
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.ancova = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+load(fullfile(w.datadir, '4_SECOND_LEVEL', 'ABseq', 'Contrast_labels_Model_0.mat'));
+names = labels(betas_idx);
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+%-- Sequence
+Repeat_betas   = endsWith(names,'_Repeat');
+Alter_betas    = endsWith(names,'_Alter');
+Pairs_betas    = endsWith(names,'_Pairs');
+Quad_betas     = endsWith(names,'_Quad');
+PairsAlt_betas = endsWith(names,'_PairsAlt');
+PairsAltBis_betas = endsWith(names,'_PairsAltBis');
+Shrink_betas   = endsWith(names,'_Shrink');
+ThreeTwo_betas = endsWith(names,'_ThreeTwo');
+CenterMir_betas  = endsWith(names,'_CenterMir');
+Complex_betas  = endsWith(names,'_Complex');
+
+%-- Trial type
+hab_betas      = contains(names,'Hab');
+stand_betas    = contains(names,'Stand');
+dev_betas    = contains(names,'Dev');
+rightClick_betas = contains(names,'rightClick');
+leftClick_betas  = contains(names,'leftClick');
+    
+%====== Vectors for each condition, with sum=1
+
+% Habituation trials
+Hab_Repeat      = normcon(hab_betas.*Repeat_betas);
+Hab_Alter       = normcon(hab_betas.*Alter_betas);
+Hab_Pairs       = normcon(hab_betas.*Pairs_betas);
+Hab_Quad        = normcon(hab_betas.*Quad_betas);
+Hab_PairsAlt    = normcon(hab_betas.*PairsAlt_betas);
+Hab_PairsAltBis = normcon(hab_betas.*PairsAltBis_betas);
+Hab_Shrink      = normcon(hab_betas.*Shrink_betas);
+Hab_ThreeTwo    = normcon(hab_betas.*ThreeTwo_betas);
+Hab_CenterMir   = normcon(hab_betas.*CenterMir_betas);
+Hab_Complex     = normcon(hab_betas.*Complex_betas);
+
+% Standard trials
+Stand_Repeat      = normcon(stand_betas.*Repeat_betas);
+Stand_Alter       = normcon(stand_betas.*Alter_betas);
+Stand_Pairs       = normcon(stand_betas.*Pairs_betas);
+Stand_Quad        = normcon(stand_betas.*Quad_betas);
+Stand_PairsAlt    = normcon(stand_betas.*PairsAlt_betas);
+Stand_PairsAltBis = normcon(stand_betas.*PairsAltBis_betas);
+Stand_Shrink      = normcon(stand_betas.*Shrink_betas);
+Stand_ThreeTwo    = normcon(stand_betas.*ThreeTwo_betas);
+Stand_CenterMir   = normcon(stand_betas.*CenterMir_betas);
+Stand_Complex     = normcon(stand_betas.*Complex_betas);
+
+% Deviant trials
+Dev_Repeat      = normcon(dev_betas.*Repeat_betas);
+Dev_Alter       = normcon(dev_betas.*Alter_betas);
+Dev_Pairs       = normcon(dev_betas.*Pairs_betas);
+Dev_Quad        = normcon(dev_betas.*Quad_betas);
+Dev_PairsAlt    = normcon(dev_betas.*PairsAlt_betas);
+Dev_PairsAltBis = normcon(dev_betas.*PairsAltBis_betas);
+Dev_Shrink      = normcon(dev_betas.*Shrink_betas);
+Dev_ThreeTwo    = normcon(dev_betas.*ThreeTwo_betas);
+Dev_CenterMir   = normcon(dev_betas.*CenterMir_betas);
+Dev_Complex     = normcon(dev_betas.*Complex_betas);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T - Main cond effects
+%-------%
+% Create spmT contrasts
+for ii = 1:numel(names)
+    %-------%
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = names{ii};
+    tmp = conds(ii,:); tmp(tmp==0) = -1/(numel(names)-1);
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon(tmp);
+    matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none';
+    n_cont = n_cont+1;
+    %-------%
+end
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts
+vector = [1 2 3 4 5 6 7 8 9 10]; vector = vector - mean(vector);
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = 'T-DEV-BasicComplexity';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon(Dev_Repeat*vector(1)+Dev_Alter*vector(2)+Dev_Pairs*vector(3)+Dev_Quad*vector(4)+Dev_PairsAlt*vector(5)+Dev_PairsAltBis*vector(6)+Dev_Shrink*vector(7)+Dev_ThreeTwo*vector(8)+Dev_CenterMir*vector(9)+Dev_Complex*vector(10))';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+
+vector = [4 6 6 6 12 13 14 15 17 23]; vector = vector - mean(vector);
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = 'T-DEV-GeoComplexity';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon(Dev_Repeat*vector(1)+Dev_Alter*vector(2)+Dev_Pairs*vector(3)+Dev_Quad*vector(4)+Dev_PairsAlt*vector(5)+Dev_PairsAltBis*vector(6)+Dev_Shrink*vector(7)+Dev_ThreeTwo*vector(8)+Dev_CenterMir*vector(9)+Dev_Complex*vector(10))';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+
+vector = [4 6 6 6 12 13 14 15 8 0]; vector = vector - mean(vector);
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = 'T-DEV-GeoCompCollapse';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon(Dev_Repeat*vector(1)+Dev_Alter*vector(2)+Dev_Pairs*vector(3)+Dev_Quad*vector(4)+Dev_PairsAlt*vector(5)+Dev_PairsAltBis*vector(6)+Dev_Shrink*vector(7)+Dev_ThreeTwo*vector(8)+Dev_CenterMir*vector(9)+Dev_Complex*vector(10))';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+
+vector = [0 1 .47 .20 .73 .73 .47 .47 .47 .47]; vector = vector - mean(vector);
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = 'T-DEV-pAlt';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon(Dev_Repeat*vector(1)+Dev_Alter*vector(2)+Dev_Pairs*vector(3)+Dev_Quad*vector(4)+Dev_PairsAlt*vector(5)+Dev_PairsAltBis*vector(6)+Dev_Shrink*vector(7)+Dev_ThreeTwo*vector(8)+Dev_CenterMir*vector(9)+Dev_Complex*vector(10))';
+matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
+
+function Do2ndLevel_onesampleT(w, model_sub_folder)
+
+%% Contrasts loop
+% Load SPM.mat of 1st subject to get some info (conlist, connames...)
+if w.with_deriv
+    load(fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{1}, model_sub_folder, 'PhysIO', 'with_deriv', 'SPM.mat'));
+else
+    load(fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{1}, model_sub_folder, 'PhysIO', 'SPM.mat'));
+end
+
+conlist = find(cat(1,SPM.xCon(:).STAT)=='T'); % All T contrasts
+
+
+for ncon=1:numel(conlist) %%
+    % for ncon=52:numel(conlist) %%
+    
+    con_num  = conlist(ncon);
+    con_name = strrep(SPM.xCon(con_num).name,' ','');
+    con_name = strrep(con_name,'>','_minus_');
+    con_name = strrep(con_name,':','--');
+    con_name = strrep(con_name,'"','');
+    
+    %%  SPM batch with subjects loop
+    model_group_folder = fullfile('OneSampleT', model_sub_folder, ['con_' num2str(conlist(ncon), '%04.f') '_' con_name]);
+    
+    if w.with_physIO
+        model_folder = fullfile(model_group_folder, 'PhysIO');
+    else
+        model_folder = fullfile(model_group_folder, 'Standard');
+    end
+    w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+    if w.with_deriv
+        w.secondDir = fullfile (w.secondDir, 'with_deriv');
+    elseif w.with_deriv2
+        w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+    end
+    disp(['Output folder is: ' w.secondDir])
+    
+    clear matlabbatch;
+    
+    fprintf(' \n \n');
+    fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+    fprintf(['              Processing 2nd level...\n']);
+    fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+    
+    stage = 1;
+    
+    if w.contrast_only == false
+        
+        if isdir (w.secondDir)
+            delete ([w.secondDir '/*']);
+        else; mkdir(w.secondDir); end
+        cd (w.secondDir)
+        
+        
+        %==============================================================%
+        %  fMRI model specification
+        %==============================================================%
+        
+        disp(' '); disp('Collecting data from...')
+        confiles = {}; ncon = 1;
+        for iS=1:numel(w.subjects)
+            w.subName        = w.subjects{iS};
+            if w.with_physIO
+                model_folder = fullfile(model_sub_folder, 'PhysIO');
+            else
+                model_folder = fullfile(model_sub_folder, 'Standard');
+            end
+            w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+            if w.with_deriv
+                w.firstDir = fullfile (w.firstDir, 'with_deriv');
+            elseif w.with_deriv2
+                w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+            end
+
+            % if "fake contrasts" were used in the first level (to preserve
+            % contrast numbering when empty condition)
+            if isfile(fullfile(w.firstDir, 'fakecon.mat'))
+                load(fullfile(w.firstDir, 'fakecon'))
+            else
+                fakecon = {};
+            end
+            if contains(con_name, fakecon)
+                % do not include this subject contrast
+            else
+                if w.with_smoothcon
+                    confiles{ncon,1} = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon_' num2str(con_num,'%04.f')  '.*\.nii$'], Inf); ncon = ncon + 1;
+                else
+                    confiles{ncon,1} = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con_' num2str(con_num,'%04.f')  '.*\.nii$'], Inf); ncon = ncon + 1;
+                end
+                if isempty(confiles{ncon-1,1}); error(['Missing contrast(s) for ' w.subName]); end
+            end
+        end
+        disp(' '); disp(['         => ' num2str(numel(confiles)) ' subjects...'])
+        
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.t1.scans = (confiles);
+        matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+        matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+        matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+        matlabbatch{stage}.spm.stats.factorial_design.masking.im = 1;
+        matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+        matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+        matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+        matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+        
+        stage=stage+1;
+        
+        %==============================================================%
+        %  Model Estimation
+        %==============================================================%
+        
+        matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+        matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+        matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+        
+        stage=stage+1;
+        
+    end
+    
+    %==============================================================%
+    %  Contrast manager
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+    matlabbatch{stage}.spm.stats.con.consess{1}.tcon.name = con_name;
+    matlabbatch{stage}.spm.stats.con.consess{1}.tcon.weights = 1;
+    matlabbatch{stage}.spm.stats.con.consess{1}.tcon.sessrep = 'none';
+    matlabbatch{stage}.spm.stats.con.consess{2}.tcon.name = '-1';
+    matlabbatch{stage}.spm.stats.con.consess{2}.tcon.weights = -1;
+    matlabbatch{stage}.spm.stats.con.consess{2}.tcon.sessrep = 'none';
+    
+    matlabbatch{stage}.spm.stats.con.delete = 0;
+    stage=stage+1;
+    
+    %     %==============================================================%
+    %     %  Display results
+    %     %==============================================================%
+    %     matlabbatch{stage}.spm.stats.results.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+    %     matlabbatch{stage}.spm.stats.results.conspec.titlestr = '';
+    %     matlabbatch{stage}.spm.stats.results.conspec.contrasts = 1;
+    %     matlabbatch{stage}.spm.stats.results.conspec.threshdesc = 'none';
+    %     matlabbatch{stage}.spm.stats.results.conspec.thresh = 0.001;
+    %     matlabbatch{stage}.spm.stats.results.conspec.extent = 20;
+    %     matlabbatch{stage}.spm.stats.results.conspec.conjunction = 1;
+    %     matlabbatch{stage}.spm.stats.results.conspec.mask.none = 1;
+    %     matlabbatch{stage}.spm.stats.results.units = 1;
+    %     matlabbatch{stage}.spm.stats.results.export = cell(1, 0);
+    
+    %%
+    if w.contrast_only == false
+        save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+    end
+    
+    spm_jobman('initcfg');
+    spm_jobman('run',matlabbatch);
+end
+end
+
+function Do2ndLevel_onesampleT_perf(w, model_sub_folder)
+
+%% Contrasts loop
+% Load SPM.mat of 1st subject to get some info (conlist, connames...)
+
+contrasts_to_get = {'Hab_ALL', 'Stand_ALL',  'Dev_ALL'};
+perf_to_test     = {'MissRate', 'mean_RT', 'LISAS'};
+
+cond_labels = load(fullfile(w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{1}, model_sub_folder, 'PhysIO', 'Contrast_labels.mat')); cond_labels=cond_labels.labels;
+d = load(fullfile (w.datadir, 'BehavioralData_Results', 'AllSubj_BehavioralData.mat'));
+T = varfun(@nanmean,d.subj_data_all,'GroupingVariables',{'Subject'}','InputVariable',{'mean_RT'; 'nTargets'; 'nHIT'; 'nMISS'; 'nFA'; 'HitRate'; 'MissRate'; 'IES'; 'LISAS'});
+torem = find(~ismember(T.Subject, w.subjects));
+T(torem, :) = [];
+
+for ncon=1:numel(contrasts_to_get) %%
+    
+    con_num = find(strcmp(cond_labels, contrasts_to_get(ncon)));
+    con_name = contrasts_to_get{ncon};
+    con_name = strrep(con_name,'>','_minus_');
+    con_name = strrep(con_name,':','--');
+    con_name = strrep(con_name,'"','');
+    
+    for iperf = 1:numel(perf_to_test)
+        
+        perf = perf_to_test{iperf};
+
+        %%  SPM batch with subjects loop
+        model_group_folder = fullfile('OneSampleT_perf', model_sub_folder, [perf '_con_' num2str(con_num, '%04.f') '_' con_name]);
+
+        if w.with_physIO
+            model_folder = fullfile(model_group_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_group_folder, 'Standard');
+        end
+        w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+        if w.with_deriv
+            w.secondDir = fullfile (w.secondDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+        end
+        disp(['Output folder is: ' w.secondDir])
+
+        clear matlabbatch;
+
+        fprintf(' \n \n');
+        fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+        fprintf(['              Processing 2nd level...\n']);
+        fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+        stage = 1;
+
+        if w.contrast_only == false
+
+            if isdir (w.secondDir)
+                delete ([w.secondDir '/*']);
+            else; mkdir(w.secondDir); end
+            cd (w.secondDir)
+
+
+            %==============================================================%
+            %  fMRI model specification
+            %==============================================================%
+
+            disp(' '); disp('Collecting data from...')
+            confiles = {}; ncon = 1;
+            for iS=1:numel(w.subjects)
+                w.subName        = w.subjects{iS};
+                if w.with_physIO
+                    model_folder = fullfile(model_sub_folder, 'PhysIO');
+                else
+                    model_folder = fullfile(model_sub_folder, 'Standard');
+                end
+                w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+                if w.with_deriv
+                    w.firstDir = fullfile (w.firstDir, 'with_deriv');
+                elseif w.with_deriv2
+                    w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+                end
+
+                % if "fake contrasts" were used in the first level (to preserve
+                % contrast numbering when empty condition)
+                if isfile(fullfile(w.firstDir, 'fakecon.mat'))
+                    load(fullfile(w.firstDir, 'fakecon'))
+                else
+                    fakecon = {};
+                end
+                if contains(con_name, fakecon)
+                    % do not include this subject contrast
+                else
+                    if w.with_smoothcon
+                        confiles{ncon,1} = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon_' num2str(con_num,'%04.f')  '.*\.nii$'], Inf); ncon = ncon + 1;
+                    else
+                        confiles{ncon,1} = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con_' num2str(con_num,'%04.f')  '.*\.nii$'], Inf); ncon = ncon + 1;
+                    end
+                    if isempty(confiles{ncon-1,1}); error(['Missing contrast(s) for ' w.subName]); end
+                end
+            end
+            disp(' '); disp(['         => ' num2str(numel(confiles)) ' subjects...'])
+
+            matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+            matlabbatch{stage}.spm.stats.factorial_design.des.t1.scans = (confiles);
+            matlabbatch{stage}.spm.stats.factorial_design.cov.c = T.(['nanmean_' perf]);
+            matlabbatch{stage}.spm.stats.factorial_design.cov.cname = perf;
+            matlabbatch{stage}.spm.stats.factorial_design.cov.iCFI = 1;
+            matlabbatch{stage}.spm.stats.factorial_design.cov.iCC = 1;
+            matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+            matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+            matlabbatch{stage}.spm.stats.factorial_design.masking.im = 1;
+            matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+            matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+            matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+            matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+
+            stage=stage+1;
+
+            %==============================================================%
+            %  Model Estimation
+            %==============================================================%
+
+            matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+            matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+            matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+
+            stage=stage+1;
+
+        end
+
+        %==============================================================%
+        %  Contrast manager
+        %==============================================================%
+
+        matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+        matlabbatch{stage}.spm.stats.con.consess{1}.tcon.name = con_name;
+        matlabbatch{stage}.spm.stats.con.consess{1}.tcon.weights = [1 0];
+        matlabbatch{stage}.spm.stats.con.consess{1}.tcon.sessrep = 'none';
+        matlabbatch{stage}.spm.stats.con.consess{2}.tcon.name = ['- ' con_name];
+        matlabbatch{stage}.spm.stats.con.consess{2}.tcon.weights = [-1 0];
+        matlabbatch{stage}.spm.stats.con.consess{2}.tcon.sessrep = 'none';
+        matlabbatch{stage}.spm.stats.con.consess{3}.tcon.name = perf;
+        matlabbatch{stage}.spm.stats.con.consess{3}.tcon.weights = [0 1];
+        matlabbatch{stage}.spm.stats.con.consess{3}.tcon.sessrep = 'none';
+        matlabbatch{stage}.spm.stats.con.consess{4}.tcon.name = ['- ' perf];
+        matlabbatch{stage}.spm.stats.con.consess{4}.tcon.weights = [0 -1];
+        matlabbatch{stage}.spm.stats.con.consess{4}.tcon.sessrep = 'none';
+        matlabbatch{stage}.spm.stats.con.delete = 0;
+        stage=stage+1;
+
+        %%
+        if w.contrast_only == false
+            save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+        end
+
+        spm_jobman('initcfg');
+        spm_jobman('run',matlabbatch);
+    end
+end
+end
+
+function Do2ndLevel_Anova_HabituationEffect(w)
+
+model_sub_folder = 'Model_2';
+model_group_folder = fullfile('HabituationEffect_AnovaW', ['from' model_sub_folder]);
+betas_idx = 1:22;  % Only T maps (because loading con files), not con idx !!
+
+%%  SPM batch with subjects loop
+if w.with_physIO
+    model_folder = fullfile(model_group_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_group_folder, 'Standard');
+end
+w.secondDir = fullfile (w.datadir, '4_SECOND_LEVEL',  'ABseq', model_folder);
+if w.with_deriv
+    w.secondDir = fullfile (w.secondDir, 'with_deriv');
+elseif w.with_deriv2
+    w.secondDir = fullfile (w.secondDir, 'with_deriv2');
+end
+
+% w.secondDir = [w.secondDir '_test'];
+
+disp(['Output folder is: ' w.secondDir])
+
+clear matlabbatch;
+
+fprintf(' \n \n');
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+fprintf(['              Processing 2nd level...\n']);
+fprintf('=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---=---\n');
+
+stage = 1;
+
+if w.contrast_only == false
+    
+    if isdir (w.secondDir); delete ([w.secondDir '/*']); else; mkdir(w.secondDir); end
+    cd (w.secondDir)
+    
+    
+    %==============================================================%
+    %  fMRI model specification
+    %==============================================================%
+    disp(' '); disp('Collecting data from...')
+    for iS=1:numel(w.subjects)
+        w.subName        = w.subjects{iS};
+        disp(w.subName)
+        if w.with_physIO
+            model_folder = fullfile(model_sub_folder, 'PhysIO');
+        else
+            model_folder = fullfile(model_sub_folder, 'Standard');
+        end
+        w.firstDir = fullfile (w.datadir, '3_FIRST_LEVEL',  'ABseq', w.subjects{iS}, model_folder);
+        if w.with_deriv
+            w.firstDir = fullfile (w.firstDir, 'with_deriv');
+        elseif w.with_deriv2
+            w.firstDir = fullfile (w.firstDir, 'with_deriv2');
+        end
+        
+        if w.with_smoothcon
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^scon' '.*\.nii$'], Inf);
+        else
+            confiles = spm_select('ExtFPList',  fullfile(w.firstDir), ['^con' '.*\.nii$'], Inf);
+        end
+        if isempty(confiles); error(['Missing contrast(s) for ' w.subName]); end
+        confiles = confiles(betas_idx,:);
+        matlabbatch{stage}.spm.stats.factorial_design.dir = {w.secondDir};
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).scans = cellstr(confiles);
+        matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.fsubject(iS).conds = 1:size(confiles,1);
+    end
+    disp(' '); disp(['         => ' num2str(iS) ' subjects...'])
+    
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.dept = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.variance = 1; % 1 = unequal variance (?) /// ERROR with "equal" ??!
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.gmsca = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.des.anovaw.ancova = 0;
+    matlabbatch{stage}.spm.stats.factorial_design.cov = struct('c', {}, 'cname', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.multi_cov = struct('files', {}, 'iCFI', {}, 'iCC', {});
+    matlabbatch{stage}.spm.stats.factorial_design.masking.tm.tm_none = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.masking.im = 0; % Implicit Mask = 1
+    matlabbatch{stage}.spm.stats.factorial_design.masking.em = {w.SecondLevelExplicitMask};
+    matlabbatch{stage}.spm.stats.factorial_design.globalc.g_omit = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.gmsca.gmsca_no = 1;
+    matlabbatch{stage}.spm.stats.factorial_design.globalm.glonorm = 1;
+    
+    stage=stage+1;
+    
+    %==============================================================%
+    %  Model Estimation
+    %==============================================================%
+    
+    matlabbatch{stage}.spm.stats.fmri_est.spmmat(1) = cfg_dep('Factorial design specification: SPM.mat File', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','spmmat'));
+    matlabbatch{stage}.spm.stats.fmri_est.write_residuals = 0;
+    matlabbatch{stage}.spm.stats.fmri_est.method.Classical = 1;
+    
+    stage=stage+1;
+    
+end
+
+%==============================================================%
+%  Contrast manager
+%==============================================================%
+% Load contrast info from 1st subject
+if w.with_physIO
+    model_folder = fullfile(model_sub_folder, 'PhysIO');
+else
+    model_folder = fullfile(model_sub_folder, 'Standard');
+end
+if w.with_deriv
+    model_folder = fullfile (model_folder, 'with_deriv');
+elseif w.with_deriv2
+    model_folder = fullfile (model_folder, 'with_deriv2');
+end 
+load(fullfile(w.datadir, '3_FIRST_LEVEL', 'ABseq', 'sub_04', model_folder,  'Contrast_labels.mat'));
+
+names = labels(betas_idx);
+nconds = numel(names);
+conds = eye(nconds);
+
+% function to 'normalize' contrast
+normcon = @(x) x/numel(find(x>0))';
+
+%====== Create 0/1 vectors for all possible conditions
+v = create_conditions_vectors(names);
+
+%==========  SPM batch
+matlabbatch{stage}.spm.stats.con.spmmat = cellstr(fullfile(w.secondDir,'SPM.mat'));
+
+%==========  Contrasts
+n_cont = 1;
+
+%_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- T-contrasts
+labels = {% Habituation (betas)
+            'Hab_ALL_block1_vs_block2'
+            'Hab_Repeat_block1_vs_block2'
+            'Hab_Alter_block1_vs_block2'
+            'Hab_Pairs_block1_vs_block2'
+            'Hab_Quad_block1_vs_block2'
+            'Hab_PairsAlt_block1_vs_block2'
+            'Hab_Shrink_block1_vs_block2'
+            'Hab_PairsAltBis_block1_vs_block2'
+            'Hab_ThreeTwo_block1_vs_block2'
+            'Hab_CenterMir_block1_vs_block2'
+            'Hab_Complex_block1_vs_block2'
+            'Hab_ALL_block2_vs_block1'
+            'Hab_Repeat_block2_vs_block1'
+            'Hab_Alter_block2_vs_block1'
+            'Hab_Pairs_block2_vs_block1'
+            'Hab_Quad_block2_vs_block1'
+            'Hab_PairsAlt_block2_vs_block1'
+            'Hab_Shrink_block2_vs_block1'
+            'Hab_PairsAltBis_block2_vs_block1'
+            'Hab_ThreeTwo_block2_vs_block1'
+            'Hab_CenterMir_block2_vs_block1'
+            'Hab_Complex_block2_vs_block1'
+        };
+
+convalues =  [  % Habituation (betas)
+    normcon((v.Hab_Repeat_block1+v.Hab_Alter_block1+v.Hab_Pairs_block1+v.Hab_Quad_block1+v.Hab_PairsAlt_block1+v.Hab_PairsAltBis_block1+v.Hab_Shrink_block1+v.Hab_ThreeTwo_block1+v.Hab_CenterMir_block1+v.Hab_Complex_block1)...
+            - (v.Hab_Repeat_block2+v.Hab_Alter_block2+v.Hab_Pairs_block2+v.Hab_Quad_block2+v.Hab_PairsAlt_block2+v.Hab_PairsAltBis_block2+v.Hab_Shrink_block2+v.Hab_ThreeTwo_block2+v.Hab_CenterMir_block2+v.Hab_Complex_block2))';
+    normcon(v.Hab_Repeat_block1 - v.Hab_Repeat_block2)';
+    normcon(v.Hab_Alter_block1 - v.Hab_Alter_block2)';
+    normcon(v.Hab_Pairs_block1 - v.Hab_Pairs_block2)';
+    normcon(v.Hab_Quad_block1 - v.Hab_Quad_block2)';
+    normcon(v.Hab_PairsAlt_block1 - v.Hab_PairsAlt_block2)';
+    normcon(v.Hab_Shrink_block1 - v.Hab_Shrink_block2)';
+    normcon(v.Hab_PairsAltBis_block1 - v.Hab_PairsAltBis_block2)';
+    normcon(v.Hab_ThreeTwo_block1 - v.Hab_ThreeTwo_block2)';
+    normcon(v.Hab_CenterMir_block1 - v.Hab_CenterMir_block2)';
+    normcon(v.Hab_Complex_block1 - v.Hab_Complex_block2)';
+    normcon((v.Hab_Repeat_block2+v.Hab_Alter_block2+v.Hab_Pairs_block2+v.Hab_Quad_block2+v.Hab_PairsAlt_block2+v.Hab_PairsAltBis_block2+v.Hab_Shrink_block2+v.Hab_ThreeTwo_block2+v.Hab_CenterMir_block2+v.Hab_Complex_block2)...
+            - (v.Hab_Repeat_block1+v.Hab_Alter_block1+v.Hab_Pairs_block1+v.Hab_Quad_block1+v.Hab_PairsAlt_block1+v.Hab_PairsAltBis_block1+v.Hab_Shrink_block1+v.Hab_ThreeTwo_block1+v.Hab_CenterMir_block1+v.Hab_Complex_block1))';
+    normcon(v.Hab_Repeat_block2 - v.Hab_Repeat_block1)';
+    normcon(v.Hab_Alter_block2 - v.Hab_Alter_block1)';
+    normcon(v.Hab_Pairs_block2 - v.Hab_Pairs_block1)';
+    normcon(v.Hab_Quad_block2 - v.Hab_Quad_block1)';
+    normcon(v.Hab_PairsAlt_block2 - v.Hab_PairsAlt_block1)';
+    normcon(v.Hab_Shrink_block2 - v.Hab_Shrink_block1)';
+    normcon(v.Hab_PairsAltBis_block2 - v.Hab_PairsAltBis_block1)';
+    normcon(v.Hab_ThreeTwo_block2 - v.Hab_ThreeTwo_block1)';
+    normcon(v.Hab_CenterMir_block2 - v.Hab_CenterMir_block1)';
+    normcon(v.Hab_Complex_block2 - v.Hab_Complex_block1)';
+];
+
+    %_-_-_-_-_-_-_-_-_-_-_-_-_-_-_- ADDITIONAL T-contrasts (complexity)
+    vectors = [1 2 3 4 5 6 7 8 9 10;
+               4 6 6 6 12 14 13 15 17 23;
+               4 6 6 6 12 15 16 18 21 28;
+               4 6 6 6 12 15 16 18 21 4;
+               0 1 .47 .20 .73 .47 .73 .47 .47 .47;
+               16 8 4 2 2 1 2 2 1 1;
+               1 2 4 8 8 16 8 8 16 16]; 
+    % add quadratic of geochunk
+    vvv = vectors(3,:);
+    ref = range(vvv)/2+min(vvv);
+    vvv = -(vvv - ref).^2;
+    vectors = [vectors; vvv];
+    vnames  = {'BasicComplexity';
+               'GeoComplexity'
+               'GeoChunkComplexity'
+               'GeoChunkCollapse'
+               'pAlt'
+               'Periodicity'
+               'Period'
+               'GeoChunkQuadra'};
+    for nn = 1 :size(vectors,1)
+        vector = []; vector = vectors(nn,:) - mean(vectors(nn,:) );
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-HABEFFECT12-' vnames{nn}];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon((v.Hab_Repeat_block1 - v.Hab_Repeat_block2)*vector(1)+...
+                                                                                (v.Hab_Alter_block1 - v.Hab_Alter_block2)*vector(2)+...
+                                                                                (v.Hab_Pairs_block1 - v.Hab_Pairs_block2)*vector(3)+...
+                                                                                (v.Hab_Quad_block1 - v.Hab_Quad_block2)*vector(4)+...
+                                                                                (v.Hab_PairsAlt_block1 - v.Hab_PairsAlt_block2)*vector(5)+...
+                                                                                (v.Hab_Shrink_block1 - v.Hab_Shrink_block2)*vector(6)+...
+                                                                                (v.Hab_PairsAltBis_block1 - v.Hab_PairsAltBis_block2)*vector(7)+...
+                                                                                (v.Hab_ThreeTwo_block1 - v.Hab_ThreeTwo_block2)*vector(8)+...
+                                                                                (v.Hab_CenterMir_block1 - v.Hab_CenterMir_block2)*vector(9)+...
+                                                                                (v.Hab_Complex_block1 - v.Hab_Complex_block2)*vector(10))';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.name    = ['T-HABEFFECT21-' vnames{nn}];
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.weights = normcon((v.Hab_Repeat_block2 - v.Hab_Repeat_block1)*vector(1)+...
+                                                                                (v.Hab_Alter_block2 - v.Hab_Alter_block1)*vector(2)+...
+                                                                                (v.Hab_Pairs_block2 - v.Hab_Pairs_block1)*vector(3)+...
+                                                                                (v.Hab_Quad_block2 - v.Hab_Quad_block1)*vector(4)+...
+                                                                                (v.Hab_PairsAlt_block2 - v.Hab_PairsAlt_block1)*vector(5)+...
+                                                                                (v.Hab_Shrink_block2 - v.Hab_Shrink_block1)*vector(6)+...
+                                                                                (v.Hab_PairsAltBis_block2 - v.Hab_PairsAltBis_block1)*vector(7)+...
+                                                                                (v.Hab_ThreeTwo_block2 - v.Hab_ThreeTwo_block1)*vector(8)+...
+                                                                                (v.Hab_CenterMir_block2 - v.Hab_CenterMir_block1)*vector(9)+...
+                                                                                (v.Hab_Complex_block2 - v.Hab_Complex_block1)*vector(10))';
+        matlabbatch{stage}.spm.stats.con.consess{n_cont}.tcon.sessrep = 'none'; n_cont = n_cont+1;
+
+    end   
+    disp(['Number of contrasts = ' num2str(n_cont-1)])
+
+
+%-------%
+matlabbatch{stage}.spm.stats.con.delete = 1;
+
+%%
+if w.contrast_only == false
+    save(fullfile(w.secondDir, 'SPM12_2ndLevel_matlabbatch.mat'),'matlabbatch');
+end
+
+spm_jobman('initcfg');
+spm_jobman('run',matlabbatch);
+
+disp(' '); disp('List of conditions:')
+disp(names')
+
+
+end
